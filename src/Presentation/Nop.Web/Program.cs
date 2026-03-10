@@ -2,7 +2,10 @@
 using Nop.Core.Configuration;
 using Nop.Core.Infrastructure;
 using Nop.Web.Framework.Infrastructure.Extensions;
-
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
+using OpenTelemetry.Exporter;  // Add this line
 namespace Nop.Web;
 
 public partial class Program
@@ -21,6 +24,41 @@ public partial class Program
 
         //load application settings
         builder.Services.ConfigureApplicationSettings(builder);
+
+        // ADD OPENTELEMETRY HERE - RIGHT AFTER ConfigureApplicationSettings
+        builder.Services.AddOpenTelemetry()
+            .WithTracing(tracing =>
+            {
+                tracing.AddSource("nopCommerce.OrderFlow")
+                    .AddSource("nopCommerce.Catalog")
+                    .SetResourceBuilder(ResourceBuilder.CreateDefault()
+                        .AddService("nopCommerce", serviceVersion: "1.0.0"))
+                    .AddAspNetCoreInstrumentation(options =>
+                    {
+                        options.RecordException = true;
+                        options.Filter = (context) => 
+                            !context.Request.Path.StartsWithSegments("/health") &&
+                            !context.Request.Path.StartsWithSegments("/metrics");
+                    })
+                    .AddHttpClientInstrumentation()
+                    .AddEntityFrameworkCoreInstrumentation(options =>
+                    {
+                        options.SetDbStatementForText = true;
+                    })
+                    .AddProcessor(new SensitiveDataProcessor())  // <-- ADD THIS LINE
+                    .AddOtlpExporter(options =>
+                        {
+                            options.Endpoint = new Uri("http://localhost:4317");
+                            options.Protocol = OpenTelemetry.Exporter.OtlpExportProtocol.Grpc;
+                        });
+            })
+            .WithMetrics(metrics =>
+            {
+                metrics.AddAspNetCoreInstrumentation()
+                       .AddHttpClientInstrumentation()
+                       .AddMeter("nopCommerce.OrderMetrics")
+                       .AddPrometheusExporter();
+            });
 
         var appSettings = Singleton<AppSettings>.Instance;
         var useAutofac = appSettings.Get<CommonConfig>().UseAutofac;
@@ -42,6 +80,9 @@ public partial class Program
         builder.Services.ConfigureApplicationServices(builder);
 
         var app = builder.Build();
+
+        // ADD PROMETHEUS ENDPOINT HERE - AFTER builder.Build()
+        app.UseOpenTelemetryPrometheusScrapingEndpoint();
 
         //configure the application HTTP request pipeline
         app.ConfigureRequestPipeline();
