@@ -3,7 +3,8 @@ using Nop.Core.Domain.Orders;
 using Nop.Core.Domain.Payments;
 using Nop.Services.Catalog;
 using Nop.Services.Customers;
-
+using System.Diagnostics;
+using Nop.Services;
 namespace Nop.Services.Payments;
 
 /// <summary>
@@ -50,28 +51,51 @@ public partial class PaymentService : IPaymentService
     /// </returns>
     public virtual async Task<ProcessPaymentResult> ProcessPaymentAsync(ProcessPaymentRequest processPaymentRequest)
     {
-        if (processPaymentRequest.OrderTotal == decimal.Zero)
+        using var activity = DiagnosticsConfig.ActivitySource.StartActivity("Payment.Process");
+        activity?.SetTag("payment.method", processPaymentRequest.PaymentMethodSystemName);
+        activity?.SetTag("customer.id", processPaymentRequest.CustomerId);
+        activity?.SetTag("order.total", processPaymentRequest.OrderTotal);
+
+        try
         {
-            var result = new ProcessPaymentResult
+            if (processPaymentRequest.OrderTotal == decimal.Zero)
             {
-                NewPaymentStatus = PaymentStatus.Paid
-            };
-            return result;
-        }
+                var result = new ProcessPaymentResult
+                {
+                    NewPaymentStatus = PaymentStatus.Paid
+                };
+                return result;
+            }
 
-        //We should strip out any white space or dash in the CC number entered.
-        if (!string.IsNullOrWhiteSpace(processPaymentRequest.CreditCardNumber))
+            //We should strip out any white space or dash in the CC number entered.
+            if (!string.IsNullOrWhiteSpace(processPaymentRequest.CreditCardNumber))
+            {
+                processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace(" ", string.Empty);
+                processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace("-", string.Empty);
+            }
+
+            var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
+            var paymentMethod = await _paymentPluginManager
+                                    .LoadPluginBySystemNameAsync(processPaymentRequest.PaymentMethodSystemName, customer, processPaymentRequest.StoreId)
+                                ?? throw new NopException("Payment method couldn't be loaded");
+
+            var paymentResult = await paymentMethod.ProcessPaymentAsync(processPaymentRequest);
+
+            if (!paymentResult.Success)
+            {
+                DiagnosticsConfig.OrdersFailed.Add(1);
+                activity?.SetTag("payment.error", string.Join(",", paymentResult.Errors));
+            }
+
+            return paymentResult;
+        }
+        catch (Exception ex)
         {
-            processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace(" ", string.Empty);
-            processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace("-", string.Empty);
+            DiagnosticsConfig.OrdersFailed.Add(1);
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            activity?.SetTag("exception", ex.ToString());
+            throw;
         }
-
-        var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
-        var paymentMethod = await _paymentPluginManager
-                                .LoadPluginBySystemNameAsync(processPaymentRequest.PaymentMethodSystemName, customer, processPaymentRequest.StoreId)
-                            ?? throw new NopException("Payment method couldn't be loaded");
-
-        return await paymentMethod.ProcessPaymentAsync(processPaymentRequest);
     }
 
     /// <summary>

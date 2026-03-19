@@ -17,7 +17,8 @@ using Nop.Services.Security;
 using Nop.Services.Shipping.Date;
 using Nop.Services.Stores;
 using Nop.Services.Vendors;
-
+using System.Diagnostics;
+using Nop.Services;
 namespace Nop.Services.Catalog;
 
 /// <summary>
@@ -1699,6 +1700,11 @@ public partial class ProductService : IProductService
     /// <returns>A task that represents the asynchronous operation</returns>
     public virtual async Task AdjustInventoryAsync(Product product, int quantityToChange, string attributesXml = "", string message = "")
     {
+
+        using var activity = DiagnosticsConfig.ActivitySource.StartActivity("Inventory.Adjust");
+        activity?.SetTag("product.id", product?.Id);
+        activity?.SetTag("quantity.change", quantityToChange);
+        activity?.SetTag("inventory.before", product?.StockQuantity);
         ArgumentNullException.ThrowIfNull(product);
 
         if (quantityToChange == 0)
