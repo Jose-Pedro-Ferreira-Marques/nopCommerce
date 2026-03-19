@@ -48,7 +48,7 @@ public partial class Program
                     .AddProcessor(new SensitiveDataProcessor())  // <-- ADD THIS LINE
                     .AddOtlpExporter(options =>
                         {
-                            options.Endpoint = new Uri("http://localhost:4317");
+                            options.Endpoint = new Uri("http://jaeger:4317");;
                             options.Protocol = OpenTelemetry.Exporter.OtlpExportProtocol.Grpc;
                         });
             })
