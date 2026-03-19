@@ -6,6 +6,9 @@ services:
             - "80:80"
         depends_on:
             - nopcommerce_database
+        networks:
+            - nopcommerce_observability  # ADICIONADO
+
     nopcommerce_database:
         image: "mcr.microsoft.com/mssql/server:2019-latest"
         container_name: nopcommerce_mssql_server
@@ -13,6 +16,13 @@ services:
             SA_PASSWORD: "nopCommerce_db_password"
             ACCEPT_EULA: "Y"
             MSSQL_PID: "Express"
+        networks:
+            - nopcommerce_observability  # ADICIONADO
 
 volumes:
-  nopcommerce_data:            
+  nopcommerce_data:
+
+networks:
+  nopcommerce_observability:  # NOVA SEÇÃO
+    external: true
+    name: nopcommerce_observability
