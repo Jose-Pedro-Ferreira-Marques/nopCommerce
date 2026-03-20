@@ -3,15 +3,19 @@ import { check, sleep } from 'k6';
 import { randomIntBetween } from 'https://jslib.k6.io/k6-utils/1.2.0/index.js';
 
 export let options = {
-  vus: 2,
-  duration: '15s',
+  vus: 5,  
+  duration: '30s',  
 };
 
 const BASE_URL = 'http://localhost';
-const PRODUCT_URL = '/build-your-own-computer';
-const PRODUCT_ID = 1;
 
-// Headers para AJAX (add to cart)
+const PRODUCTS = [
+  { url: '/build-your-own-computer', id: 1, name: 'Build Your Own Computer' },
+  { url: '/simple-product', id: 2, name: 'Simple Product' },
+  { url: '/digital-download', id: 3, name: 'Digital Download' },
+  { url: '/gift-card', id: 4, name: 'Gift Card' }
+];
+
 const ajaxHeaders = {
   'Accept': '*/*',
   'Accept-Language': 'pt-PT,pt;q=0.8,en;q=0.5,en-US;q=0.3',
@@ -21,7 +25,6 @@ const ajaxHeaders = {
   'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:137.0) Gecko/20100101 Firefox/137.0'
 };
 
-// Headers para formulários normais
 const formHeaders = {
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
   'Accept-Language': 'pt-PT,pt;q=0.8,en;q=0.5,en-US;q=0.3',
@@ -75,9 +78,10 @@ function registerUser(cookies, vuId) {
   
   if (registered) {
     console.log(`✅ Usuário registrado: ${email}`);
+  } else {
+    console.log(`❌ Falha no registro: ${email}`);
   }
   
-  // Atualizar cookies
   if (res.cookies) {
     cookies = { ...cookies, ...res.cookies };
   }
@@ -85,33 +89,56 @@ function registerUser(cookies, vuId) {
   return { success: registered, email: email };
 }
 
+function shouldFail(stepName, failRate = 0.2) {
+  const random = Math.random();
+  const fail = random < failRate;
+  if (fail) {
+    console.log(`💥 SIMULATED FAILURE at step: ${stepName} (random: ${random.toFixed(2)})`);
+  }
+  return fail;
+}
+
 export default function () {
   let res;
   let cookies = {};
   let token = '';
   
-  // 1. Homepage
+  const product = PRODUCTS[Math.floor(Math.random() * PRODUCTS.length)];
+  console.log(`📦 Selected product: ${product.name} (ID: ${product.id})`);
+  
+  if (shouldFail('Homepage', 0.05)) {
+    console.log(`❌ Simulated failure - skipping this user`);
+    return;
+  }
+  
   res = http.get(BASE_URL + '/');
   check(res, { 'homepage status 200': (r) => r.status === 200 });
   cookies = res.cookies;
   console.log(`🍪 Cookies após homepage:`, Object.keys(cookies).length);
 
-  // 2. Registrar novo usuário
   let registration = registerUser(cookies, __VU);
   check(registration, { 'registration successful': () => registration.success });
   if (!registration.success) return;
   console.log(`🍪 Cookies após registro:`, Object.keys(cookies).length);
+  
+  if (shouldFail('After Registration', 0.1)) {
+    console.log(`❌ Simulated failure after registration - stopping`);
+    return;
+  }
 
-  // 3. Product page
-  res = http.get(BASE_URL + PRODUCT_URL, {
+  res = http.get(BASE_URL + product.url, {
     headers: formHeaders,
     cookies: cookies
   });
   check(res, { 'product page status 200': (r) => r.status === 200 });
   token = extractToken(res.body);
   console.log(`🔑 Token extraído da product page: ${token ? 'SIM' : 'NÃO'}`);
+  
+  if (shouldFail('Product Page', 0.05)) {
+    console.log(`❌ Simulated failure on product page - stopping`);
+    return;
+  }
 
-  // 4. Add to cart
   let addToCartPayload = {
     'product_attribute_1': '2',
     'product_attribute_2': '3',
@@ -126,10 +153,15 @@ export default function () {
     .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
     .join('&');
   
-  res = http.post(BASE_URL + `/addproducttocart/details/${PRODUCT_ID}/1`, payloadString, {
+  res = http.post(BASE_URL + `/addproducttocart/details/${product.id}/1`, payloadString, {
     headers: ajaxHeaders,
     cookies: cookies
   });
+  
+  if (shouldFail('Add to Cart', 0.15)) {
+    console.log(`❌ Simulated failure - skipping cart and checkout`);
+    return;
+  }
   
   if (res.status === 200) {
     try {
@@ -141,12 +173,10 @@ export default function () {
     }
   }
 
-  // Atualizar cookies
   if (res.cookies) {
     cookies = { ...cookies, ...res.cookies };
   }
 
-  // 5. Cart page
   res = http.get(BASE_URL + '/cart', {
     headers: formHeaders,
     cookies: cookies
@@ -154,16 +184,14 @@ export default function () {
   check(res, { 'cart page status 200': (r) => r.status === 200 });
   console.log(`🍪 Cookies após cart page:`, Object.keys(cookies).length);
 
-  // Atualizar cookies
   if (res.cookies) {
     cookies = { ...cookies, ...res.cookies };
   }
 
-  // 5.5 - Checkout attributes (gift wrapping)
   console.log(`🔍 Enviando checkout attributes...`);
 
   let checkoutAttributesData = {
-      'checkout_attribute_1': '1',  // 1 = No gift wrapping
+      'checkout_attribute_1': '1',
       'itemquantity152': '1',
       'CountryId': '237',
       'StateProvinceId': '1828',
@@ -190,7 +218,6 @@ export default function () {
           let body = JSON.parse(res.body);
           console.log(`✅ Checkout attributes saved`);
           
-          // Extrair novo token se disponível
           if (body.selectedcheckoutattributesssectionhtml) {
               console.log(`📦 Gift wrapping: ${body.selectedcheckoutattributesssectionhtml}`);
           }
@@ -199,12 +226,10 @@ export default function () {
       }
   }
 
-  // Atualizar cookies
   if (res.cookies) {
     cookies = { ...cookies, ...res.cookies };
   }
 
-  // 6. Checkout page
   res = http.get(BASE_URL + '/onepagecheckout', {
     headers: formHeaders,
     cookies: cookies
@@ -215,13 +240,10 @@ export default function () {
   console.log(`🔑 Token extraído da checkout page: ${token ? 'SIM' : 'NÃO'}`);
   console.log(`🍪 Cookies após checkout page:`, Object.keys(cookies).length);
 
-  // Atualizar cookies
   if (res.cookies) {
     cookies = { ...cookies, ...res.cookies };
   }
 
-  // 7. Billing address
-// 7. Billing address
   let billingData = {
     'ShipToSameAddress': ['true', 'false'],
     'billing_address_id': '0',
@@ -231,7 +253,7 @@ export default function () {
     'BillingNewAddress.Email': registration.email,
     'BillingNewAddress.Company': 'a',
     'BillingNewAddress.CountryId': '237',
-    'BillingNewAddress.StateProvinceId': '1799',  // Mudei de 0 para 1799
+    'BillingNewAddress.StateProvinceId': '1799',
     'BillingNewAddress.City': 'a',
     'BillingNewAddress.Address1': 'a',
     'BillingNewAddress.Address2': 'a',
@@ -247,7 +269,6 @@ export default function () {
     .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
     .join('&');
   
-  // 7. Billing address
   console.log(`🔍 Enviando billing address...`);
   res = http.post(BASE_URL + '/checkout/OpcSaveBilling', billingString, {
     headers: formHeaders,
@@ -256,27 +277,17 @@ export default function () {
   });
 
   console.log(`✅ Billing saved - Status: ${res.status}`);
+  
+  if (shouldFail('Billing Address', 0.1)) {
+    console.log(`❌ Simulated failure at billing - stopping`);
+    return;
+  }
 
-  // ATUALIZAR COOKIES
   if (res.cookies) {
     cookies = { ...cookies, ...res.cookies };
     console.log(`🍪 Cookies atualizados após billing:`, Object.keys(cookies).length);
   }
 
-  // Extrair billing_address_id da resposta
-  if (res.body && typeof res.body === 'string') {
-    try {
-      let body = JSON.parse(res.body);
-      // A resposta pode conter o ID do endereço criado
-      console.log(`📦 Resposta billing:`, JSON.stringify(body));
-      
-      // Se houver um campo com o ID do endereço, capture-o
-      // (o nome do campo pode variar)
-    } catch (e) {
-      console.log(`❌ Erro ao parsear resposta do billing`);
-    }
-  }
-  // 8. Shipping method
   let shippingData = {
     'shippingoption': 'Ground___Shipping.FixedRate',
     '__RequestVerificationToken': token
@@ -286,9 +297,8 @@ export default function () {
     .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
     .join('&');
   
-  // 8. Shipping method - CORRIGIDO
   console.log(`🔍 Enviando shipping method...`);
-  res = http.post(BASE_URL + '/checkout/OpcSaveShippingMethod', shippingString, {  // MUDADO
+  res = http.post(BASE_URL + '/checkout/OpcSaveShippingMethod', shippingString, {
     headers: formHeaders,
     cookies: cookies,
     followRedirects: false
@@ -297,21 +307,11 @@ export default function () {
   check(res.status === 200 || res.status === 302, { 'save shipping success': () => true });
   console.log(`✅ Shipping method saved - Status: ${res.status}`);
   
-  // ATUALIZAR COOKIES
   if (res.cookies) {
     cookies = { ...cookies, ...res.cookies };
     console.log(`🍪 Cookies atualizados após shipping:`, Object.keys(cookies).length);
   }
   
-  if (res.body && typeof res.body === 'string') {
-    let newToken = extractToken(res.body);
-    if (newToken) {
-      token = newToken;
-      console.log(`🔄 Token atualizado após shipping`);
-    }
-  }
-
-  // 9. Payment method
   let paymentData = {
     'paymentmethod': 'Payments.CheckMoneyOrder',
     '__RequestVerificationToken': token
@@ -321,7 +321,7 @@ export default function () {
     .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
     .join('&');
 
-  console.log(`🔍 Enviando payment method para ${BASE_URL}/checkout/OpcSavePaymentMethod`);
+  console.log(`🔍 Enviando payment method...`);
   res = http.post(BASE_URL + '/checkout/OpcSavePaymentMethod', paymentString, {
     headers: formHeaders,
     cookies: cookies,
@@ -329,36 +329,18 @@ export default function () {
   });
 
   console.log(`📊 Status payment method: ${res.status}`);
+  
+  if (shouldFail('Payment Method', 0.12)) {
+    console.log(`❌ Simulated failure at payment method - stopping`);
+    return;
+  }
 
-  // ATUALIZAR COOKIES
   if (res.cookies) {
     cookies = { ...cookies, ...res.cookies };
     console.log(`🍪 Cookies atualizados após payment method:`, Object.keys(cookies).length);
   }
 
-  if (res.status === 200) {
-    try {
-        let body = JSON.parse(res.body);
-        console.log(`✅ Payment method saved`);
-        
-        if (body.update_section && body.update_section.html) {
-            let newToken = extractToken(body.update_section.html);
-            if (newToken) {
-                token = newToken;
-                console.log(`🔄 Token atualizado do HTML do payment method`);
-            }
-        }
-    } catch (e) {
-        console.log(`❌ Erro ao parsear resposta: ${res.body.substring(0, 100)}`);
-    }
-  } else {
-    console.log(`❌ Payment method failed with status ${res.status}`);
-  }
-
-  check(res.status === 200, { 'save payment success': () => true });
-
-  // 9.5 - Payment info com checkout attributes
-  console.log(`🔍 Enviando payment info com gift wrapping...`);
+  console.log(`🔍 Enviando payment info...`);
 
   let paymentInfoData = {
       'checkout_attribute_1': '1',
@@ -377,30 +359,11 @@ export default function () {
 
   console.log(`📊 Status payment info: ${res.status}`);
 
-  // ATUALIZAR COOKIES
   if (res.cookies) {
     cookies = { ...cookies, ...res.cookies };
     console.log(`🍪 Cookies atualizados após payment info:`, Object.keys(cookies).length);
   }
 
-  if (res.status === 200) {
-      try {
-          let body = JSON.parse(res.body);
-          console.log(`✅ Payment info saved com gift wrapping = No`);
-          
-          if (body.update_section && body.update_section.html) {
-              let newToken = extractToken(body.update_section.html);
-              if (newToken) {
-                  token = newToken;
-                  console.log(`🔄 Token atualizado`);
-              }
-          }
-      } catch (e) {
-          console.log(`❌ Erro ao parsear resposta`);
-      }
-  }
-
-  // 10. Confirm order
   let confirmData = {
     '__RequestVerificationToken': token
   };
@@ -417,15 +380,7 @@ export default function () {
   });
 
   console.log(`📊 Status da confirmação: ${res.status}`);
-  console.log(`📋 Headers:`, JSON.stringify(res.headers));
-  console.log(`📝 Body (primeiros 200 chars): ${res.body.substring(0, 200)}`);
 
-  // ATUALIZAR COOKIES (última vez)
-  if (res.cookies) {
-    cookies = { ...cookies, ...res.cookies };
-  }
-
-  // Verificar se é realmente um sucesso
   let confirmSuccess = false;
   if (res.status === 200) {
     try {
@@ -441,6 +396,12 @@ export default function () {
     } catch (e) {
         console.log(`❌ Resposta não é JSON: ${res.body.substring(0, 100)}`);
     }
+  }
+  
+  if (!confirmSuccess || shouldFail('Final Confirmation', 0.05)) {
+    console.log(`❌ Order failed!`);
+  } else {
+    console.log(`✅ Order completed successfully!`);
   }
 
   check(confirmSuccess, { 'order confirmation success': () => confirmSuccess });
