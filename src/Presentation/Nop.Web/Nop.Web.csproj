@@ -63,6 +63,7 @@
     <Content Update="**\*.config;**\*.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- EXISTING OPENTELEMETRY PACKAGES -->
   <ItemGroup>
     <PackageReference Include="OpenTelemetry" Version="1.7.0" />
     <PackageReference Include="OpenTelemetry.Api" Version="1.7.0" />
@@ -72,6 +73,16 @@
     <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.7.0" />
     <PackageReference Include="OpenTelemetry.Instrumentation.EntityFrameworkCore" Version="1.0.0-beta.7" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.7.0" />
+  </ItemGroup>
+
+  <!-- ADD SERILOG PACKAGES FOR LOGGING -->
+  <ItemGroup>
+    <PackageReference Include="Serilog.AspNetCore" Version="8.0.0" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="5.0.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
+    <PackageReference Include="Serilog.Sinks.Seq" Version="7.0.0" />
+    <PackageReference Include="Serilog.Enrichers.Span" Version="3.1.0" />
+    <PackageReference Include="Serilog.Enrichers.Environment" Version="2.3.0" />
   </ItemGroup>
 
   <!-- This target execute after "Build" target.

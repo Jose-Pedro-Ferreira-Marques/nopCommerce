@@ -56,10 +56,14 @@ public partial class PaymentService : IPaymentService
         activity?.SetTag("customer.id", processPaymentRequest.CustomerId);
         activity?.SetTag("order.total", processPaymentRequest.OrderTotal);
 
+        // LOG PAYMENT START
+        Console.WriteLine($"[INFO] Payment processing started for customer {processPaymentRequest.CustomerId}. Method: {processPaymentRequest.PaymentMethodSystemName}, Amount: {processPaymentRequest.OrderTotal:C}");
+
         try
         {
             if (processPaymentRequest.OrderTotal == decimal.Zero)
             {
+                Console.WriteLine($"[INFO] Payment skipped - order total is zero for customer {processPaymentRequest.CustomerId}");
                 var result = new ProcessPaymentResult
                 {
                     NewPaymentStatus = PaymentStatus.Paid
@@ -79,18 +83,32 @@ public partial class PaymentService : IPaymentService
                                     .LoadPluginBySystemNameAsync(processPaymentRequest.PaymentMethodSystemName, customer, processPaymentRequest.StoreId)
                                 ?? throw new NopException("Payment method couldn't be loaded");
 
+            Console.WriteLine($"[INFO] Payment method loaded: {paymentMethod.PluginDescriptor?.SystemName} for customer {processPaymentRequest.CustomerId}");
+
             var paymentResult = await paymentMethod.ProcessPaymentAsync(processPaymentRequest);
 
             if (!paymentResult.Success)
             {
+                // LOG PAYMENT FAILURE
+                Console.WriteLine($"[WARN] ❌ Payment failed for customer {processPaymentRequest.CustomerId}. Errors: {string.Join(", ", paymentResult.Errors)}");
+                
                 DiagnosticsConfig.OrdersFailed.Add(1);
                 activity?.SetTag("payment.error", string.Join(",", paymentResult.Errors));
+            }
+            else
+            {
+                // LOG PAYMENT SUCCESS
+                Console.WriteLine($"[INFO] ✅ Payment successful for customer {processPaymentRequest.CustomerId}. Status: {paymentResult.NewPaymentStatus}");
             }
 
             return paymentResult;
         }
         catch (Exception ex)
         {
+            // LOG PAYMENT EXCEPTION
+            Console.WriteLine($"[ERROR] 💥 Payment exception for customer {processPaymentRequest.CustomerId}: {ex.Message}");
+            Console.WriteLine($"[ERROR] Stack trace: {ex.StackTrace}");
+            
             DiagnosticsConfig.OrdersFailed.Add(1);
             activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             activity?.SetTag("exception", ex.ToString());

@@ -23,7 +23,6 @@ namespace Nop.Services
             "orders.failed", 
             description: "Number of failed order placements");
 
-        // NEW METRIC FOR INVENTORY
         public static Histogram<int> InventoryLevel = Meter.CreateHistogram<int>(
             "inventory.level", 
             unit: "items", 

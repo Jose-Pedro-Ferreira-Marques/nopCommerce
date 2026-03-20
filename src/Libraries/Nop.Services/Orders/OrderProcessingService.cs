@@ -1586,7 +1586,7 @@ public partial class OrderProcessingService : IOrderProcessingService
         Console.WriteLine($"🔥 PlaceOrderAsync INICIADO para customer {processPaymentRequest.CustomerId} em {DateTime.Now:HH:mm:ss}");
         Console.WriteLine($"📋 Dados do pedido: OrderTotal={processPaymentRequest.OrderTotal}, PaymentMethod={processPaymentRequest.PaymentMethodSystemName}");
         
-        using var activity = DiagnosticsConfig.ActivitySource.StartActivity("PlaceOrder");
+        using var activity = DiagnosticsConfig.ActivitySource.StartActivity("OrderProcessing.PlaceOrder");
         DiagnosticsConfig.OrdersStarted.Add(1);
         Console.WriteLine($"✅ OrdersStarted incrementado para {processPaymentRequest.CustomerId} - Total agora: {DiagnosticsConfig.OrdersStarted}");
 
@@ -1673,7 +1673,10 @@ public partial class OrderProcessingService : IOrderProcessingService
                             
                         // Record order value
                         Console.WriteLine($"📊 Registrando métrica OrderValue: {order.OrderTotal}");
-                        DiagnosticsConfig.OrderValue.Record((double)order.OrderTotal);
+                       DiagnosticsConfig.OrderValue.Record((double)order.OrderTotal,
+                        new KeyValuePair<string, object>("order.id", order.Id),
+                        new KeyValuePair<string, object>("customer.id", order.CustomerId),
+                        new KeyValuePair<string, object>("payment.method", order.PaymentMethodSystemName));
                         activity?.SetTag("order.total", order.OrderTotal);
                         activity?.SetTag("order.id", order.Id);
                         

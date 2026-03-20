@@ -1698,47 +1698,66 @@ public partial class ProductService : IProductService
     /// <param name="attributesXml">Attributes in XML format</param>
     /// <param name="message">Message for the stock quantity history</param>
     /// <returns>A task that represents the asynchronous operation</returns>
-    public virtual async Task AdjustInventoryAsync(Product product, int quantityToChange, string attributesXml = "", string message = "")
+   public virtual async Task AdjustInventoryAsync(Product product, int quantityToChange, string attributesXml = "", string message = "")
     {
-
         using var activity = DiagnosticsConfig.ActivitySource.StartActivity("Inventory.Adjust");
         activity?.SetTag("product.id", product?.Id);
         activity?.SetTag("quantity.change", quantityToChange);
         activity?.SetTag("inventory.before", product?.StockQuantity);
         ArgumentNullException.ThrowIfNull(product);
 
+        // LOG INVENTORY ADJUSTMENT START
+        Console.WriteLine($"[INFO] Inventory adjustment started for product {product?.Id} (SKU: {product?.Sku}). Change: {quantityToChange}, Current stock: {product?.StockQuantity}");
+
         if (quantityToChange == 0)
+        {
+            Console.WriteLine($"[DEBUG] Inventory adjustment skipped - quantity change is zero for product {product?.Id}");
             return;
+        }
 
         if (product.ManageInventoryMethod == ManageInventoryMethod.ManageStock)
         {
+            Console.WriteLine($"[INFO] Managing inventory using ManageStock method for product {product.Id}");
+            
             //update stock quantity
             if (product.UseMultipleWarehouses)
             {
                 //use multiple warehouses
                 if (quantityToChange < 0)
+                {
+                    Console.WriteLine($"[INFO] Reserving inventory for product {product.Id}: {quantityToChange}");
                     await ReserveInventoryAsync(product, quantityToChange);
+                }
                 else
+                {
+                    Console.WriteLine($"[INFO] Unblocking reserved inventory for product {product.Id}: {quantityToChange}");
                     await UnblockReservedInventoryAsync(product, quantityToChange);
+                }
             }
             else
             {
                 //do not use multiple warehouses
                 //simple inventory management
+                var oldStock = product.StockQuantity;
                 product.StockQuantity += quantityToChange;
                 await UpdateProductAsync(product);
+                
+                Console.WriteLine($"[INFO] Inventory updated for product {product.Id}: {oldStock} → {product.StockQuantity} (change: {quantityToChange})");
 
                 //quantity change history
                 await AddStockQuantityHistoryEntryAsync(product, quantityToChange, product.StockQuantity, product.WarehouseId, message);
             }
 
             var totalStock = await GetTotalStockQuantityAsync(product);
+            Console.WriteLine($"[INFO] Total stock for product {product.Id}: {totalStock}");
 
             await ApplyLowStockActivityAsync(product, totalStock);
 
             //send email notification
             if (quantityToChange < 0 && totalStock < product.NotifyAdminForQuantityBelow)
             {
+                Console.WriteLine($"[WARN] Low stock alert for product {product.Id}. Stock: {totalStock}, Threshold: {product.NotifyAdminForQuantityBelow}");
+                
                 //do not inject IWorkflowMessageService via constructor because it'll cause circular references
                 var workflowMessageService = EngineContext.Current.Resolve<IWorkflowMessageService>();
                 await workflowMessageService.SendQuantityBelowStoreOwnerNotificationAsync(product, _localizationSettings.DefaultAdminLanguageId);
@@ -1753,11 +1772,16 @@ public partial class ProductService : IProductService
 
         if (product.ManageInventoryMethod == ManageInventoryMethod.ManageStockByAttributes)
         {
+            Console.WriteLine($"[INFO] Managing inventory using ManageStockByAttributes method for product {product.Id}");
+            
             var combination = await _productAttributeParser.FindProductAttributeCombinationAsync(product, attributesXml);
             if (combination != null)
             {
+                var oldCombinationStock = combination.StockQuantity;
                 combination.StockQuantity += quantityToChange;
                 await _productAttributeService.UpdateProductAttributeCombinationAsync(combination);
+                
+                Console.WriteLine($"[INFO] Attribute combination stock updated for product {product.Id}: {oldCombinationStock} → {combination.StockQuantity} (change: {quantityToChange})");
 
                 //quantity change history
                 await AddStockQuantityHistoryEntryAsync(product, quantityToChange, combination.StockQuantity, message: message, combinationId: combination.Id);
@@ -1767,6 +1791,8 @@ public partial class ProductService : IProductService
                     var totalStockByAllCombinations = await (await _productAttributeService.GetAllProductAttributeCombinationsAsync(product.Id))
                         .ToAsyncEnumerable()
                         .SumAsync(c => c.StockQuantity);
+                    
+                    Console.WriteLine($"[INFO] Total stock across all combinations for product {product.Id}: {totalStockByAllCombinations}");
 
                     await ApplyLowStockActivityAsync(product, totalStockByAllCombinations);
                 }
@@ -1774,6 +1800,8 @@ public partial class ProductService : IProductService
                 //send email notification
                 if (quantityToChange < 0 && combination.StockQuantity < combination.NotifyAdminForQuantityBelow)
                 {
+                    Console.WriteLine($"[WARN] Low stock alert for product {product.Id} combination. Stock: {combination.StockQuantity}, Threshold: {combination.NotifyAdminForQuantityBelow}");
+                    
                     //do not inject IWorkflowMessageService via constructor because it'll cause circular references
                     var workflowMessageService = EngineContext.Current.Resolve<IWorkflowMessageService>();
                     await workflowMessageService.SendQuantityBelowStoreOwnerNotificationAsync(combination, _localizationSettings.DefaultAdminLanguageId);
@@ -1785,10 +1813,19 @@ public partial class ProductService : IProductService
                     }
                 }
             }
+            else
+            {
+                Console.WriteLine($"[WARN] No attribute combination found for product {product.Id} with attributes: {attributesXml}");
+            }
         }
 
         //bundled products
         var attributeValues = await _productAttributeParser.ParseProductAttributeValuesAsync(attributesXml);
+        if (attributeValues.Any())
+        {
+            Console.WriteLine($"[DEBUG] Processing {attributeValues.Count()} bundled products for product {product.Id}");
+        }
+        
         foreach (var attributeValue in attributeValues)
         {
             if (attributeValue.AttributeValueType != AttributeValueType.AssociatedToProduct)
@@ -1797,8 +1834,19 @@ public partial class ProductService : IProductService
             //associated product (bundle)
             var associatedProduct = await GetProductByIdAsync(attributeValue.AssociatedProductId);
             if (associatedProduct != null) 
+            {
+                Console.WriteLine($"[INFO] Adjusting inventory for bundled product {associatedProduct.Id} (quantity: {quantityToChange * attributeValue.Quantity})");
                 await AdjustInventoryAsync(associatedProduct, quantityToChange * attributeValue.Quantity, message);
+            }
         }
+        
+        var currentStock = await GetTotalStockQuantityAsync(product);
+        
+        // LOG FINAL INVENTORY
+        Console.WriteLine($"[INFO] ✅ Inventory adjustment completed for product {product.Id}. Final stock: {currentStock}");
+        
+        DiagnosticsConfig.InventoryLevel.Record(currentStock,
+            new KeyValuePair<string, object>("product.id", product.Id));
     }
 
     /// <summary>
