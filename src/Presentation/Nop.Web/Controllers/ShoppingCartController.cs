@@ -39,9 +39,9 @@ using Nop.Web.Framework.Mvc.Routing;
 using Nop.Web.Infrastructure.Cache;
 using Nop.Web.Models.Media;
 using Nop.Web.Models.ShoppingCart;
-
+using Nop.Services; 
 namespace Nop.Web.Controllers;
-
+using System.Diagnostics;
 [AutoValidateAntiforgeryToken]
 public partial class ShoppingCartController : BasePublicController
 {
@@ -787,90 +787,128 @@ public partial class ShoppingCartController : BasePublicController
 
     //add product to cart using AJAX
     //currently we use this method on the product details pages
+    //add product to cart using AJAX
+//currently we use this method on the product details pages
     [HttpPost]
     public virtual async Task<IActionResult> AddProductToCart_Details(int productId, int shoppingCartTypeId, IFormCollection form, int? customwishlistid = null)
     {
-        var product = await _productService.GetProductByIdAsync(productId);
-        if (product == null)
+        // START INSTRUMENTATION
+        using var activity = DiagnosticsConfig.ActivitySource.StartActivity("ShoppingCart.AddToCart");
+        activity?.SetTag("product.id", productId);
+        activity?.SetTag("cart.type", ((ShoppingCartType)shoppingCartTypeId).ToString());
+        activity?.SetTag("http.method", "POST");
+        activity?.SetTag("http.route", "/shoppingcart/addproducttocart_details");
+        
+        try
         {
-            return Json(new
+            var product = await _productService.GetProductByIdAsync(productId);
+            if (product == null)
             {
-                redirect = Url.RouteUrl(NopRouteNames.General.HOMEPAGE)
-            });
-        }
-
-        //we can add only simple products
-        if (product.ProductType != ProductType.SimpleProduct)
-        {
-            return Json(new
-            {
-                success = false,
-                message = "Only simple products could be added to the cart"
-            });
-        }
-
-        //update existing shopping cart item
-        var updatecartitemid = 0;
-        foreach (var formKey in form.Keys)
-        {
-            if (formKey.Equals($"addtocart_{productId}.UpdatedShoppingCartItemId", StringComparison.InvariantCultureIgnoreCase))
-            {
-                _ = int.TryParse(form[formKey], out updatecartitemid);
-                break;
+                activity?.SetTag("product.exists", false);
+                return Json(new
+                {
+                    redirect = Url.RouteUrl(NopRouteNames.General.HOMEPAGE)
+                });
             }
-        }
+            
+            activity?.SetTag("product.name", product.Name);
+            activity?.SetTag("product.sku", product.Sku);
+            activity?.SetTag("product.exists", true);
 
-        ShoppingCartItem updatecartitem = null;
-        if (_shoppingCartSettings.AllowCartItemEditing && updatecartitemid > 0)
-        {
-            var store = await _storeContext.GetCurrentStoreAsync();
-            //search with the same cart type as specified
-            var cart = await _shoppingCartService.GetShoppingCartAsync(await _workContext.GetCurrentCustomerAsync(), 
-                (ShoppingCartType)shoppingCartTypeId, store.Id, customWishlistId: customwishlistid);
-
-            updatecartitem = cart.FirstOrDefault(x => x.Id == updatecartitemid);
-            //not found? let's ignore it. in this case we'll add a new item
-            //if (updatecartitem == null)
-            //{
-            //    return Json(new
-            //    {
-            //        success = false,
-            //        message = "No shopping cart item found to update"
-            //    });
-            //}
-            //is it this product?
-            if (updatecartitem != null && product.Id != updatecartitem.ProductId)
+            //we can add only simple products
+            if (product.ProductType != ProductType.SimpleProduct)
             {
+                activity?.SetTag("product.type", product.ProductType.ToString());
+                activity?.SetTag("error", "Only simple products can be added");
                 return Json(new
                 {
                     success = false,
-                    message = "This product does not match a passed shopping cart item identifier"
+                    message = "Only simple products could be added to the cart"
                 });
             }
+
+            //update existing shopping cart item
+            var updatecartitemid = 0;
+            foreach (var formKey in form.Keys)
+            {
+                if (formKey.Equals($"addtocart_{productId}.UpdatedShoppingCartItemId", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    _ = int.TryParse(form[formKey], out updatecartitemid);
+                    break;
+                }
+            }
+
+            ShoppingCartItem updatecartitem = null;
+            if (_shoppingCartSettings.AllowCartItemEditing && updatecartitemid > 0)
+            {
+                var store = await _storeContext.GetCurrentStoreAsync();
+                //search with the same cart type as specified
+                var cart = await _shoppingCartService.GetShoppingCartAsync(await _workContext.GetCurrentCustomerAsync(), 
+                    (ShoppingCartType)shoppingCartTypeId, store.Id, customWishlistId: customwishlistid);
+
+                updatecartitem = cart.FirstOrDefault(x => x.Id == updatecartitemid);
+                //not found? let's ignore it. in this case we'll add a new item
+                //if (updatecartitem == null)
+                //{
+                //    return Json(new
+                //    {
+                //        success = false,
+                //        message = "No shopping cart item found to update"
+                //    });
+                //}
+                //is it this product?
+                if (updatecartitem != null && product.Id != updatecartitem.ProductId)
+                {
+                    activity?.SetTag("error", "Product ID mismatch during update");
+                    return Json(new
+                    {
+                        success = false,
+                        message = "This product does not match a passed shopping cart item identifier"
+                    });
+                }
+            }
+
+            var addToCartWarnings = new List<string>();
+
+            //customer entered price
+            var customerEnteredPriceConverted = await _productAttributeParser.ParseCustomerEnteredPriceAsync(product, form);
+
+            //entered quantity
+            var quantity = _productAttributeParser.ParseEnteredQuantity(product, form);
+            activity?.SetTag("quantity", quantity);
+
+            //product and gift card attributes
+            var attributes = await _productAttributeParser.ParseProductAttributesAsync(product, form, addToCartWarnings);
+
+            //rental attributes
+            _productAttributeParser.ParseRentalDates(product, form, out var rentalStartDate, out var rentalEndDate);
+
+            var cartType = updatecartitem == null ? (ShoppingCartType)shoppingCartTypeId :
+                //if the item to update is found, then we ignore the specified "shoppingCartTypeId" parameter
+                updatecartitem.ShoppingCartType;
+
+            await SaveItemAsync(updatecartitem, addToCartWarnings, product, cartType, attributes, customerEnteredPriceConverted, rentalStartDate, rentalEndDate, quantity);
+
+            // Record add to cart success/failure in activity
+            if (addToCartWarnings.Any())
+            {
+                activity?.SetTag("warnings", string.Join(", ", addToCartWarnings));
+                activity?.SetStatus(ActivityStatusCode.Error, "Failed to add to cart");
+            }
+            else
+            {
+                activity?.SetStatus(ActivityStatusCode.Ok, "Successfully added to cart");
+            }
+
+            //return result
+            return await GetProductToCartDetailsAsync(addToCartWarnings, cartType, product, updatecartitem, customwishlistid);
         }
-
-        var addToCartWarnings = new List<string>();
-
-        //customer entered price
-        var customerEnteredPriceConverted = await _productAttributeParser.ParseCustomerEnteredPriceAsync(product, form);
-
-        //entered quantity
-        var quantity = _productAttributeParser.ParseEnteredQuantity(product, form);
-
-        //product and gift card attributes
-        var attributes = await _productAttributeParser.ParseProductAttributesAsync(product, form, addToCartWarnings);
-
-        //rental attributes
-        _productAttributeParser.ParseRentalDates(product, form, out var rentalStartDate, out var rentalEndDate);
-
-        var cartType = updatecartitem == null ? (ShoppingCartType)shoppingCartTypeId :
-            //if the item to update is found, then we ignore the specified "shoppingCartTypeId" parameter
-            updatecartitem.ShoppingCartType;
-
-        await SaveItemAsync(updatecartitem, addToCartWarnings, product, cartType, attributes, customerEnteredPriceConverted, rentalStartDate, rentalEndDate, quantity);
-
-        //return result
-        return await GetProductToCartDetailsAsync(addToCartWarnings, cartType, product, updatecartitem, customwishlistid);
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            activity?.SetTag("exception", ex.ToString());
+            throw;
+        }
     }
 
     //handle product attribute selection event. this way we return new price, overridden gtin/sku/mpn

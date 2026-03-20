@@ -23,9 +23,10 @@ using Nop.Services.Seo;
 using Nop.Services.Shipping;
 using Nop.Services.Shipping.Date;
 using Nop.Services.Stores;
-
+using System.Diagnostics;
+using Nop.Services;
 namespace Nop.Services.Orders;
-
+using Nop.Services; 
 /// <summary>
 /// Shopping cart service
 /// </summary>
@@ -750,6 +751,10 @@ public partial class ShoppingCartService : IShoppingCartService
     public virtual async Task<IList<ShoppingCartItem>> GetShoppingCartAsync(Customer customer, ShoppingCartType? shoppingCartType = null,
         int storeId = 0, int? productId = null, DateTime? createdFromUtc = null, DateTime? createdToUtc = null, int? customWishlistId = null)
     {
+        using var activity = DiagnosticsConfig.ActivitySource.StartActivity("ShoppingCart.Get");
+        activity?.SetTag("customer.id", customer?.Id);
+        activity?.SetTag("shopping.cart.type", shoppingCartType?.ToString());
+        activity?.SetTag("store.id", storeId);
         ArgumentNullException.ThrowIfNull(customer);
 
         var items = _sciRepository.Table.Where(sci => sci.CustomerId == customer.Id);
@@ -1549,6 +1554,11 @@ public partial class ShoppingCartService : IShoppingCartService
         DateTime? rentalStartDate = null, DateTime? rentalEndDate = null,
         int quantity = 1, bool addRequiredProducts = true, int? wishlistId = null)
     {
+        using var activity = DiagnosticsConfig.ActivitySource.StartActivity("ShoppingCart.Add");
+        activity?.SetTag("customer.id", customer?.Id);
+        activity?.SetTag("product.id", product?.Id);
+        activity?.SetTag("quantity", quantity);
+        activity?.SetTag("shopping.cart.type", shoppingCartType.ToString());
         ArgumentNullException.ThrowIfNull(customer);
 
         ArgumentNullException.ThrowIfNull(product);

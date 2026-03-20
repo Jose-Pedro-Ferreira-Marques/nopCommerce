@@ -31,7 +31,8 @@ using Nop.Services.Shipping;
 using Nop.Services.Stores;
 using Nop.Services.Tax;
 using Nop.Services.Vendors;
-
+using Nop.Services;
+using System.Diagnostics;
 namespace Nop.Services.Orders;
 
 /// <summary>
@@ -1564,131 +1565,235 @@ public partial class OrderProcessingService : IOrderProcessingService
     /// A task that represents the asynchronous operation
     /// The task result contains the place order result
     /// </returns>
+/// <summary>
+/// Places an order
+/// </summary>
+/// <param name="processPaymentRequest">Process payment request</param>
+/// <returns>
+/// A task that represents the asynchronous operation
+/// The task result contains the place order result
+/// </returns>
+   /// <summary>
+/// Places an order
+/// </summary>
+/// <param name="processPaymentRequest">Process payment request</param>
+/// <returns>
+/// A task that represents the asynchronous operation
+/// The task result contains the place order result
+/// </returns>
     public virtual async Task<PlaceOrderResult> PlaceOrderAsync(ProcessPaymentRequest processPaymentRequest)
     {
+        Console.WriteLine($"🔥 PlaceOrderAsync INICIADO para customer {processPaymentRequest.CustomerId} em {DateTime.Now:HH:mm:ss}");
+        Console.WriteLine($"📋 Dados do pedido: OrderTotal={processPaymentRequest.OrderTotal}, PaymentMethod={processPaymentRequest.PaymentMethodSystemName}");
+        
+        using var activity = DiagnosticsConfig.ActivitySource.StartActivity("OrderProcessing.PlaceOrder");
+        DiagnosticsConfig.OrdersStarted.Add(1);
+        Console.WriteLine($"✅ OrdersStarted incrementado para {processPaymentRequest.CustomerId} - Total agora: {DiagnosticsConfig.OrdersStarted}");
+
+        // Add safe tags (avoid PII!)
+        activity?.SetTag("customer.id", processPaymentRequest.CustomerId);
+        activity?.SetTag("payment.method", processPaymentRequest.PaymentMethodSystemName);
+        
         ArgumentNullException.ThrowIfNull(processPaymentRequest);
 
         if (processPaymentRequest.OrderGuid == Guid.Empty)
-            throw new Exception("Order GUID is not generated");
-
-        //prepare order details
-        var details = await PreparePlaceOrderDetailsAsync(processPaymentRequest);
-
-        async Task<PlaceOrderResult> placeOrder(PlaceOrderContainer placeOrderContainer)
         {
-            var result = new PlaceOrderResult();
-
-            try
-            {
-                var processPaymentResult =
-                    await GetProcessPaymentResultAsync(processPaymentRequest, placeOrderContainer)
-                    ?? throw new NopException("processPaymentResult is not available");
-
-                if (processPaymentResult.Success)
-                {
-                    var order = await SaveOrderDetailsAsync(processPaymentRequest, processPaymentResult,
-                        placeOrderContainer);
-                    result.PlacedOrder = order;
-
-                    //move shopping cart items to order items
-                    await MoveShoppingCartItemsToOrderItemsAsync(placeOrderContainer, order);
-
-                    //discount usage history
-                    await SaveDiscountUsageHistoryAsync(placeOrderContainer, order);
-
-                    //gift card usage history
-                    await SaveGiftCardUsageHistoryAsync(placeOrderContainer, order);
-
-                    //recurring orders
-                    if (placeOrderContainer.IsRecurringShoppingCart)
-                        await CreateFirstRecurringPaymentAsync(processPaymentRequest, order);
-
-                    //notifications
-                    await SendNotificationsAndSaveNotesAsync(order);
-
-                    //reset checkout data
-                    await _customerService.ResetCheckoutDataAsync(placeOrderContainer.Customer,
-                        processPaymentRequest.StoreId, clearCouponCodes: true, clearCheckoutAttributes: true);
-                    await _customerActivityService.InsertActivityAsync("PublicStore.PlaceOrder",
-                        string.Format(await _localizationService.GetResourceAsync("ActivityLog.PublicStore.PlaceOrder"),
-                            order.Id), order);
-
-                    //raise event       
-                    await _eventPublisher.PublishAsync(new OrderPlacedEvent(order));
-
-                    //check order status
-                    await CheckOrderStatusAsync(order);
-
-                    if (order.PaymentStatus == PaymentStatus.Paid)
-                        await ProcessOrderPaidAsync(order);
-                }
-                else
-                {
-                    foreach (var paymentError in processPaymentResult.Errors)
-                    {
-                        result.AddError(string.Format(
-                            await _localizationService.GetResourceAsync("Checkout.PaymentError"), paymentError));
-                    }
-                }
-            }
-            catch (Exception exc)
-            {
-                await _logger.ErrorAsync(exc.Message, exc);
-                result.AddError(exc.Message);
-            }
-
-            if (result.Success)
-                return result;
-
-            //log errors
-            var logError = result.Errors.Aggregate("Error while placing order. ",
-                (current, next) => $"{current}Error {result.Errors.IndexOf(next) + 1}: {next}. ");
-            var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
-            await _logger.ErrorAsync(logError, customer: customer);
-
-            return result;
+            Console.WriteLine($"❌ Erro: Order GUID não gerado");
+            activity?.SetTag("error", "Order GUID is not generated");
+            throw new Exception("Order GUID is not generated");
         }
-
-        if (!_orderSettings.PlaceOrderWithLock)
-            return await placeOrder(details);
-
-        PlaceOrderResult result;
-        var resource = details.Customer.Id.ToString();
-
-        //the named mutex helps to avoid creating the same order in different threads,
-        //and does not decrease performance significantly, because the code is blocked only for the specific cart.
-        //you should be very careful, mutexes cannot be used in with the await operation
-        //we can't use semaphore here, because it produces PlatformNotSupportedException exception on UNIX based systems
-        using var mutex = new Mutex(false, resource);
-
-        mutex.WaitOne();
 
         try
         {
-            var cacheKey = _staticCacheManager.PrepareKey(NopOrderDefaults.OrderWithLockCacheKey, resource);
-            cacheKey.CacheTime = _orderSettings.MinimumOrderPlacementInterval;
+            Console.WriteLine($"📦 Preparando detalhes do pedido...");
+            //prepare order details
+            var details = await PreparePlaceOrderDetailsAsync(processPaymentRequest);
+            Console.WriteLine($"📦 Detalhes do pedido preparados. Cart items: {details.Cart?.Count}, Customer: {details.Customer?.Email ?? "N/A"}");
 
-            var exist = _staticCacheManager.GetAsync(cacheKey, () => false).Result;
+            async Task<PlaceOrderResult> placeOrder(PlaceOrderContainer placeOrderContainer)
+            {
+                var result = new PlaceOrderResult();
 
-            if (exist)
-            {
-                result = new PlaceOrderResult();
-                result.Errors.Add(_localizationService.GetResourceAsync("Checkout.MinOrderPlacementInterval").Result);
-            }
-            else
-            {
-                result = placeOrder(details).Result;
+                try
+                {
+                    Console.WriteLine($"💳 Obtendo resultado do processamento de pagamento...");
+                    var processPaymentResult =
+                        await GetProcessPaymentResultAsync(processPaymentRequest, placeOrderContainer)
+                        ?? throw new NopException("processPaymentResult is not available");
+
+                    Console.WriteLine($"💳 Resultado do pagamento: Success={processPaymentResult.Success}, PaymentStatus={processPaymentResult.NewPaymentStatus}");
+
+                    if (processPaymentResult.Success)
+                    {
+                        Console.WriteLine($"💳 Pagamento processado com sucesso");
+                        
+                        Console.WriteLine($"💾 Salvando detalhes do pedido no banco de dados...");
+                        var order = await SaveOrderDetailsAsync(processPaymentRequest, processPaymentResult,
+                            placeOrderContainer);
+                        result.PlacedOrder = order;
+                        
+                        Console.WriteLine($"🎉 Pedido SALVO no banco! Order ID: {order.Id}, Order Number: {order.CustomOrderNumber}, Total: {order.OrderTotal:C}");
+                        Console.WriteLine($"📊 Status do pedido: PaymentStatus={order.PaymentStatus}, OrderStatus={order.OrderStatus}");
+
+                        //move shopping cart items to order items
+                        Console.WriteLine($"🛒 Movendo itens do carrinho para o pedido...");
+                        await MoveShoppingCartItemsToOrderItemsAsync(placeOrderContainer, order);
+                        Console.WriteLine($"🛒 Itens do carrinho movidos para o pedido");
+
+                        //discount usage history
+                        await SaveDiscountUsageHistoryAsync(placeOrderContainer, order);
+
+                        //gift card usage history
+                        await SaveGiftCardUsageHistoryAsync(placeOrderContainer, order);
+
+                        //recurring orders
+                        if (placeOrderContainer.IsRecurringShoppingCart)
+                            await CreateFirstRecurringPaymentAsync(processPaymentRequest, order);
+
+                        //notifications
+                        await SendNotificationsAndSaveNotesAsync(order);
+                        Console.WriteLine($"📧 Notificações enviadas");
+
+                        //reset checkout data
+                        await _customerService.ResetCheckoutDataAsync(placeOrderContainer.Customer,
+                            processPaymentRequest.StoreId, clearCouponCodes: true, clearCheckoutAttributes: true);
+                        
+                        await _customerActivityService.InsertActivityAsync("PublicStore.PlaceOrder",
+                            string.Format(await _localizationService.GetResourceAsync("ActivityLog.PublicStore.PlaceOrder"),
+                                order.Id), order);
+
+                        //raise event       
+                        await _eventPublisher.PublishAsync(new OrderPlacedEvent(order));
+
+                        //check order status
+                        await CheckOrderStatusAsync(order);
+
+                        if (order.PaymentStatus == PaymentStatus.Paid)
+                            await ProcessOrderPaidAsync(order);
+                            
+                        // Record order value
+                        Console.WriteLine($"📊 Registrando métrica OrderValue: {order.OrderTotal}");
+                       DiagnosticsConfig.OrderValue.Record((double)order.OrderTotal,
+                        new KeyValuePair<string, object>("order.id", order.Id),
+                        new KeyValuePair<string, object>("customer.id", order.CustomerId),
+                        new KeyValuePair<string, object>("payment.method", order.PaymentMethodSystemName));
+                        activity?.SetTag("order.total", order.OrderTotal);
+                        activity?.SetTag("order.id", order.Id);
+                        
+                        Console.WriteLine($"📊 Métricas registradas com sucesso");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"❌ Pagamento falhou: {string.Join(", ", processPaymentResult.Errors)}");
+                        
+                        foreach (var paymentError in processPaymentResult.Errors)
+                        {
+                            result.AddError(string.Format(
+                                await _localizationService.GetResourceAsync("Checkout.PaymentError"), paymentError));
+                        }
+                        DiagnosticsConfig.OrdersFailed.Add(1);
+                        activity?.SetTag("error.reason", string.Join(",", processPaymentResult.Errors));
+                        Console.WriteLine($"❌ OrdersFailed incrementado - Total de falhas: {DiagnosticsConfig.OrdersFailed}");
+                    }
+                }
+                catch (Exception exc)
+                {
+                    Console.WriteLine($"💥 EXCEÇÃO no placeOrder: {exc.Message}");
+                    Console.WriteLine($"📋 Stack trace: {exc.StackTrace}");
+                    
+                    await _logger.ErrorAsync(exc.Message, exc);
+                    result.AddError(exc.Message);
+                    DiagnosticsConfig.OrdersFailed.Add(1);
+                    activity?.SetStatus(ActivityStatusCode.Error, exc.Message);
+                    activity?.SetTag("error.details", exc.ToString());
+                    
+                    Console.WriteLine($"❌ OrdersFailed incrementado devido a exceção - Total: {DiagnosticsConfig.OrdersFailed}");
+                }
 
                 if (result.Success)
-                    _staticCacheManager.SetAsync(cacheKey, true).Wait();
-            }
-        }
-        finally
-        {
-            mutex.ReleaseMutex();
-        }
+                {
+                    Console.WriteLine($"✅ Pedido finalizado com sucesso!");
+                    return result;
+                }
 
-        return result;
+                //log errors
+                var logError = result.Errors.Aggregate("Error while placing order. ",
+                    (current, next) => $"{current}Error {result.Errors.IndexOf(next) + 1}: {next}. ");
+                var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
+                await _logger.ErrorAsync(logError, customer: customer);
+                
+                Console.WriteLine($"❌ Pedido falhou: {logError}");
+
+                return result;
+            }
+
+            if (!_orderSettings.PlaceOrderWithLock)
+            {
+                Console.WriteLine($"🔓 PlaceOrderWithLock está desabilitado, executando placeOrder diretamente");
+                return await placeOrder(details);
+            }
+
+            Console.WriteLine($"🔒 PlaceOrderWithLock está habilitado, usando mutex");
+            PlaceOrderResult result;
+            var resource = details.Customer.Id.ToString();
+
+            //the named mutex helps to avoid creating the same order in different threads,
+            //and does not decrease performance significantly, because the code is blocked only for the specific cart.
+            //you should be very careful, mutexes cannot be used in with the await operation
+            //we can't use semaphore here, because it produces PlatformNotSupportedException exception on UNIX based systems
+            using var mutex = new Mutex(false, resource);
+
+            Console.WriteLine($"🔒 Aguardando mutex para recurso {resource}...");
+            mutex.WaitOne();
+            Console.WriteLine($"🔒 Mutex adquirido para {resource}");
+
+            try
+            {
+                var cacheKey = _staticCacheManager.PrepareKey(NopOrderDefaults.OrderWithLockCacheKey, resource);
+                cacheKey.CacheTime = _orderSettings.MinimumOrderPlacementInterval;
+
+                var exist = _staticCacheManager.GetAsync(cacheKey, () => false).Result;
+                Console.WriteLine($"🔍 Verificando cache para pedido com lock: exist={exist}");
+
+                if (exist)
+                {
+                    Console.WriteLine($"⏱️ Intervalo mínimo entre pedidos não respeitado");
+                    result = new PlaceOrderResult();
+                    result.Errors.Add(_localizationService.GetResourceAsync("Checkout.MinOrderPlacementInterval").Result);
+                    DiagnosticsConfig.OrdersFailed.Add(1);
+                    activity?.SetTag("error.reason", "Minimum order placement interval not met");
+                    Console.WriteLine($"❌ OrdersFailed incrementado - Total: {DiagnosticsConfig.OrdersFailed}");
+                }
+                else
+                {
+                    Console.WriteLine($"✅ Executando placeOrder com lock");
+                    result = placeOrder(details).Result;
+
+                    if (result.Success)
+                    {
+                        Console.WriteLine($"✅ Pedido bem-sucedido, salvando no cache");
+                        _staticCacheManager.SetAsync(cacheKey, true).Wait();
+                    }
+                }
+            }
+            finally
+            {
+                Console.WriteLine($"🔒 Liberando mutex para {resource}");
+                mutex.ReleaseMutex();
+            }
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"💥 EXCEÇÃO no PlaceOrderAsync: {ex.Message}");
+            Console.WriteLine($"📋 Stack trace: {ex.StackTrace}");
+            
+            DiagnosticsConfig.OrdersFailed.Add(1);
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            activity?.SetTag("error.details", ex.ToString());
+            throw;
+        }
     }
 
     /// <summary>

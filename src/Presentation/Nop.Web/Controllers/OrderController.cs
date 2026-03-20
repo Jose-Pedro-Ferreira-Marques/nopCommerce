@@ -14,9 +14,10 @@ using Nop.Services.Shipping;
 using Nop.Web.Factories;
 using Nop.Web.Framework.Controllers;
 using Nop.Web.Framework.Mvc.Filters;
-
+using Nop.Services; 
+using Nop.Services.Catalog;
 namespace Nop.Web.Controllers;
-
+using System.Diagnostics;
 [AutoValidateAntiforgeryToken]
 public partial class OrderController : BasePublicController
 {
@@ -35,6 +36,7 @@ public partial class OrderController : BasePublicController
     protected readonly IWorkContext _workContext;
     protected readonly OrderSettings _orderSettings;
     protected readonly RewardPointsSettings _rewardPointsSettings;
+    protected readonly IProductService _productService; 
 
     #endregion
 
@@ -52,7 +54,8 @@ public partial class OrderController : BasePublicController
         IWebHelper webHelper,
         IWorkContext workContext,
         OrderSettings orderSettings,
-        RewardPointsSettings rewardPointsSettings)
+        RewardPointsSettings rewardPointsSettings,
+        IProductService productService)
     {
         _customerService = customerService;
         _localizationService = localizationService;
@@ -67,6 +70,7 @@ public partial class OrderController : BasePublicController
         _workContext = workContext;
         _orderSettings = orderSettings;
         _rewardPointsSettings = rewardPointsSettings;
+        _productService = productService;
     }
 
     #endregion
@@ -172,14 +176,47 @@ public partial class OrderController : BasePublicController
     //My account / Order details page
     public virtual async Task<IActionResult> Details(int orderId)
     {
-        var order = await _orderService.GetOrderByIdAsync(orderId);
-        var customer = await _workContext.GetCurrentCustomerAsync();
+        // START INSTRUMENTATION
+        using var activity = DiagnosticsConfig.ActivitySource.StartActivity("Order.Details");
+        activity?.SetTag("order.id", orderId);
+        activity?.SetTag("http.method", "GET");
+        activity?.SetTag("http.route", "/order/details");
+        
+        try
+        {
+            var order = await _orderService.GetOrderByIdAsync(orderId);
+            var customer = await _workContext.GetCurrentCustomerAsync();
 
-        if (order == null || order.Deleted || customer.Id != order.CustomerId)
-            return Challenge();
+            if (order == null || order.Deleted || customer.Id != order.CustomerId)
+                return Challenge();
 
-        var model = await _orderModelFactory.PrepareOrderDetailsModelAsync(order);
-        return View(model);
+            activity?.SetTag("order.total", order.OrderTotal);
+            activity?.SetTag("order.status", order.OrderStatus.ToString());
+            activity?.SetTag("customer.id", customer.Id);
+            
+            // Optional: Record inventory level metric for ordered products
+            var orderItems = await _orderService.GetOrderItemsAsync(order.Id);
+            foreach (var orderItem in orderItems)
+            {
+                var product = await _productService.GetProductByIdAsync(orderItem.ProductId);
+                if (product != null)
+                {
+                    var stockQuantity = await _productService.GetTotalStockQuantityAsync(product);
+                    DiagnosticsConfig.InventoryLevel.Record(stockQuantity, 
+                        new KeyValuePair<string, object>("product.id", product.Id),
+                        new KeyValuePair<string, object>("product.sku", product.Sku ?? "unknown"));
+                }
+            }
+
+            var model = await _orderModelFactory.PrepareOrderDetailsModelAsync(order);
+            return View(model);
+        }
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            activity?.SetTag("exception", ex.ToString());
+            throw;
+        }
     }
 
     //My account / Order details page / Print

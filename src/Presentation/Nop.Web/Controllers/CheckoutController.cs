@@ -26,9 +26,9 @@ using Nop.Web.Framework.Mvc.Filters;
 using Nop.Web.Models.Checkout;
 using Nop.Web.Models.Common;
 using ILogger = Nop.Services.Logging.ILogger;
-
+using Nop.Services; 
 namespace Nop.Web.Controllers;
-
+using System.Diagnostics;
 [AutoValidateAntiforgeryToken]
 public partial class CheckoutController : BasePublicController
 {
@@ -1277,89 +1277,181 @@ public partial class CheckoutController : BasePublicController
     [HttpPost, ActionName("Confirm")]
     public virtual async Task<IActionResult> ConfirmOrder(bool captchaValid)
     {
-        //validation
-        if (_orderSettings.CheckoutDisabled)
-            return RedirectToRoute(NopRouteNames.General.CART);
-
-        var customer = await _workContext.GetCurrentCustomerAsync();
-        var store = await _storeContext.GetCurrentStoreAsync();
-        var cart = await _shoppingCartService.GetShoppingCartAsync(customer, ShoppingCartType.ShoppingCart, store.Id);
-
-        if (!cart.Any())
-            return RedirectToRoute(NopRouteNames.General.CART);
-
-        if (_orderSettings.OnePageCheckoutEnabled)
-            return RedirectToRoute(NopRouteNames.Standard.CHECKOUT_ONE_PAGE);
-
-        if (await _customerService.IsGuestAsync(customer) && !_orderSettings.AnonymousCheckoutAllowed)
-            return Challenge();
-
-        //model
-        var model = await _checkoutModelFactory.PrepareConfirmOrderModelAsync(cart);
-
-        var isCaptchaSettingEnabled = await _customerService.IsGuestAsync(customer) &&
-                                      _captchaSettings.Enabled && _captchaSettings.ShowOnCheckoutPageForGuests;
-
-        //captcha validation for guest customers
-        if (isCaptchaSettingEnabled && !captchaValid)
-        {
-            model.Warnings.Add(await _localizationService.GetResourceAsync("Common.WrongCaptchaMessage"));
-            return View(model);
-        }
-
+        // START INSTRUMENTATION
+        using var activity = DiagnosticsConfig.ActivitySource.StartActivity("Checkout.ConfirmOrder");
+        activity?.SetTag("http.method", "POST");
+        activity?.SetTag("http.route", "/checkout/confirm");
+        activity?.SetTag("captcha.valid", captchaValid);
+        
         try
         {
-            //prevent 2 orders being placed within an X seconds time frame
-            if (!await IsMinimumOrderPlacementIntervalValidAsync(customer))
-                throw new Exception(await _localizationService.GetResourceAsync("Checkout.MinOrderPlacementInterval"));
+            //validation
+            if (_orderSettings.CheckoutDisabled)
+                return RedirectToRoute(NopRouteNames.General.CART);
 
-            //place order
-            var processPaymentRequest = await _orderProcessingService.GetProcessPaymentRequestAsync();
-            if (processPaymentRequest == null)
+            var customer = await _workContext.GetCurrentCustomerAsync();
+            var store = await _storeContext.GetCurrentStoreAsync();
+            var cart = await _shoppingCartService.GetShoppingCartAsync(customer, ShoppingCartType.ShoppingCart, store.Id);
+            
+            activity?.SetTag("customer.id", customer?.Id);
+            activity?.SetTag("customer.is_guest", await _customerService.IsGuestAsync(customer));
+            activity?.SetTag("cart.item_count", cart?.Count ?? 0);
+
+            // LOG ORDER START
+            Console.WriteLine($"[INFO] Order placement started for customer {customer?.Id}. Cart items: {cart?.Count ?? 0}");
+
+            if (!cart.Any())
             {
-                //Check whether payment workflow is required
-                if (await _orderProcessingService.IsPaymentWorkflowRequiredAsync(cart))
-                    return RedirectToRoute(NopRouteNames.Standard.CHECKOUT_PAYMENT_INFO);
-
-                processPaymentRequest = new ProcessPaymentRequest();
+                Console.WriteLine($"[WARN] Order placement cancelled - cart is empty for customer {customer?.Id}");
+                return RedirectToRoute(NopRouteNames.General.CART);
             }
 
-            processPaymentRequest.StoreId = store.Id;
-            processPaymentRequest.CustomerId = customer.Id;
-            processPaymentRequest.PaymentMethodSystemName = await _genericAttributeService.GetAttributeAsync<string>(customer,
-                NopCustomerDefaults.SelectedPaymentMethodAttribute, store.Id);
-            await _orderProcessingService.SetProcessPaymentRequestAsync(processPaymentRequest);
-            var placeOrderResult = await _orderProcessingService.PlaceOrderAsync(processPaymentRequest);
-            if (placeOrderResult.Success)
+            if (_orderSettings.OnePageCheckoutEnabled)
+                return RedirectToRoute(NopRouteNames.Standard.CHECKOUT_ONE_PAGE);
+
+            if (await _customerService.IsGuestAsync(customer) && !_orderSettings.AnonymousCheckoutAllowed)
+                return Challenge();
+
+            //model
+            var model = await _checkoutModelFactory.PrepareConfirmOrderModelAsync(cart);
+
+            var isCaptchaSettingEnabled = await _customerService.IsGuestAsync(customer) &&
+                                        _captchaSettings.Enabled && _captchaSettings.ShowOnCheckoutPageForGuests;
+
+            //captcha validation for guest customers
+            if (isCaptchaSettingEnabled && !captchaValid)
             {
-                await _orderProcessingService.SetProcessPaymentRequestAsync(null);
+                Console.WriteLine($"[WARN] CAPTCHA validation failed for guest customer {customer?.Id}");
+                model.Warnings.Add(await _localizationService.GetResourceAsync("Common.WrongCaptchaMessage"));
+                return View(model);
+            }
 
-                var postProcessPaymentRequest = new PostProcessPaymentRequest
-                {
-                    Order = placeOrderResult.PlacedOrder
-                };
-                await _paymentService.PostProcessPaymentAsync(postProcessPaymentRequest);
+            try
+            {
+                //prevent 2 orders being placed within an X seconds time frame
+                if (!await IsMinimumOrderPlacementIntervalValidAsync(customer))
+                    throw new Exception(await _localizationService.GetResourceAsync("Checkout.MinOrderPlacementInterval"));
 
-                if (_webHelper.IsRequestBeingRedirected || _webHelper.IsPostBeingDone)
+                // Record that an order placement has started
+                DiagnosticsConfig.OrdersStarted.Add(1, new KeyValuePair<string, object>("customer.id", customer.Id));
+
+                //place order
+                var processPaymentRequest = await _orderProcessingService.GetProcessPaymentRequestAsync();
+                if (processPaymentRequest == null)
                 {
-                    //redirection or POST has been done in PostProcessPayment
-                    return Empty;
+                    //Check whether payment workflow is required
+                    if (await _orderProcessingService.IsPaymentWorkflowRequiredAsync(cart))
+                        return RedirectToRoute(NopRouteNames.Standard.CHECKOUT_PAYMENT_INFO);
+
+                    processPaymentRequest = new ProcessPaymentRequest();
                 }
 
-                return RedirectToRoute(NopRouteNames.Standard.CHECKOUT_COMPLETED, new { orderId = placeOrderResult.PlacedOrder.Id });
+                processPaymentRequest.StoreId = store.Id;
+                processPaymentRequest.CustomerId = customer.Id;
+                processPaymentRequest.PaymentMethodSystemName = await _genericAttributeService.GetAttributeAsync<string>(customer,
+                    NopCustomerDefaults.SelectedPaymentMethodAttribute, store.Id);
+                
+                activity?.SetTag("payment.method", processPaymentRequest.PaymentMethodSystemName);
+                var cartTotal = cart.Sum(item => item.Quantity * item.CustomerEnteredPrice);
+                activity?.SetTag("cart.total", cartTotal);
+                
+                Console.WriteLine($"[INFO] Processing payment for customer {customer?.Id} with method {processPaymentRequest.PaymentMethodSystemName}, cart total: {cartTotal:C}");
+                
+                await _orderProcessingService.SetProcessPaymentRequestAsync(processPaymentRequest);
+                var placeOrderResult = await _orderProcessingService.PlaceOrderAsync(processPaymentRequest);
+                
+                if (placeOrderResult.Success)
+                {
+                    // RECORD SUCCESSFUL ORDER METRICS
+                    var order = placeOrderResult.PlacedOrder;
+                    DiagnosticsConfig.OrderValue.Record((double)order.OrderTotal, 
+                        new KeyValuePair<string, object>("order.id", order.Id),
+                        new KeyValuePair<string, object>("payment.method", order.PaymentMethodSystemName));
+                    
+                    activity?.SetTag("order.id", order.Id);
+                    activity?.SetTag("order.total", order.OrderTotal);
+                    activity?.SetTag("order.status", order.OrderStatus.ToString());
+                    activity?.SetTag("payment.status", order.PaymentStatus.ToString());
+                    activity?.SetStatus(ActivityStatusCode.Ok, "Order placed successfully");
+                    
+                    // LOG SUCCESSFUL ORDER
+                    Console.WriteLine($"[INFO] ✅ Order {order.Id} placed successfully by customer {customer?.Id}. Total: {order.OrderTotal:C}");
+                    
+                    await _orderProcessingService.SetProcessPaymentRequestAsync(null);
+
+                    var postProcessPaymentRequest = new PostProcessPaymentRequest
+                    {
+                        Order = placeOrderResult.PlacedOrder
+                    };
+                    await _paymentService.PostProcessPaymentAsync(postProcessPaymentRequest);
+
+                    // ========== ADD INVENTORY TEST CODE HERE - USE DIFFERENT VARIABLE NAMES ==========
+                    var testProductItem = await _productService.GetProductByIdAsync(1);
+                    if (testProductItem != null)
+                    {
+                        var currentStockLevel = await _productService.GetTotalStockQuantityAsync(testProductItem);
+                        Console.WriteLine($"[DEBUG] Test inventory for product 1: {currentStockLevel}");
+                        DiagnosticsConfig.InventoryLevel.Record(currentStockLevel,
+                            new KeyValuePair<string, object>("product.id", testProductItem.Id),
+                            new KeyValuePair<string, object>("test", "true"));
+                    }
+                    // ========== END INVENTORY TEST CODE ==========
+
+                    if (_webHelper.IsRequestBeingRedirected || _webHelper.IsPostBeingDone)
+                    {
+                        //redirection or POST has been done in PostProcessPayment
+                        return Empty;
+                    }
+
+                    return RedirectToRoute(NopRouteNames.Standard.CHECKOUT_COMPLETED, new { orderId = placeOrderResult.PlacedOrder.Id });
+                }
+
+                // RECORD ORDER FAILURE METRICS
+                DiagnosticsConfig.OrdersFailed.Add(1, 
+                    new KeyValuePair<string, object>("error.type", "validation"),
+                    new KeyValuePair<string, object>("error.count", placeOrderResult.Errors.Count));
+                
+                // LOG ORDER FAILURE
+                Console.WriteLine($"[WARN] ❌ Order failed for customer {customer?.Id}. Errors: {string.Join(", ", placeOrderResult.Errors)}");
+                
+                activity?.SetTag("order.errors", string.Join(", ", placeOrderResult.Errors));
+                activity?.SetStatus(ActivityStatusCode.Error, "Order validation failed");
+                
+                foreach (var error in placeOrderResult.Errors)
+                    model.Warnings.Add(error);
+            }
+            catch (Exception exc)
+            {
+                // RECORD EXCEPTION FAILURE METRICS
+                DiagnosticsConfig.OrdersFailed.Add(1, 
+                    new KeyValuePair<string, object>("error.type", "exception"),
+                    new KeyValuePair<string, object>("error.message", exc.Message));
+                
+                // LOG EXCEPTION
+                Console.WriteLine($"[ERROR] 💥 Exception placing order for customer {customer?.Id}: {exc.Message}");
+                Console.WriteLine($"[ERROR] Stack trace: {exc.StackTrace}");
+                
+                activity?.SetStatus(ActivityStatusCode.Error, exc.Message);
+                activity?.SetTag("exception.type", exc.GetType().Name);
+                activity?.SetTag("exception.stacktrace", exc.StackTrace);
+                
+                await _logger.WarningAsync(exc.Message, exc);
+                model.Warnings.Add(exc.Message);
             }
 
-            foreach (var error in placeOrderResult.Errors)
-                model.Warnings.Add(error);
+            //If we got this far, something failed, redisplay form
+            return View(model);
         }
-        catch (Exception exc)
+        catch (Exception ex)
         {
-            await _logger.WarningAsync(exc.Message, exc);
-            model.Warnings.Add(exc.Message);
+            // LOG UNHANDLED EXCEPTION
+            Console.WriteLine($"[ERROR] 💥 Unhandled exception in ConfirmOrder: {ex.Message}");
+            Console.WriteLine($"[ERROR] Stack trace: {ex.StackTrace}");
+            
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            activity?.SetTag("exception.unhandled", ex.ToString());
+            throw;
         }
-
-        //If we got this far, something failed, redisplay form
-        return View(model);
     }
 
     #endregion
@@ -2018,12 +2110,19 @@ public partial class CheckoutController : BasePublicController
     [HttpPost]
     public virtual async Task<IActionResult> OpcConfirmOrder(bool captchaValid)
     {
+        // START INSTRUMENTATION
+        using var activity = DiagnosticsConfig.ActivitySource.StartActivity("Checkout.OpcConfirmOrder");
+        activity?.SetTag("http.method", "POST");
+        activity?.SetTag("http.route", "/checkout/opcconfirmorder");
+        activity?.SetTag("captcha.valid", captchaValid);
+        
         try
         {
             var customer = await _workContext.GetCurrentCustomerAsync();
-
+            activity?.SetTag("customer.id", customer?.Id);
+            
             var isCaptchaSettingEnabled = await _customerService.IsGuestAsync(customer) &&
-                                          _captchaSettings.Enabled && _captchaSettings.ShowOnCheckoutPageForGuests;
+                                        _captchaSettings.Enabled && _captchaSettings.ShowOnCheckoutPageForGuests;
 
             var confirmOrderModel = new CheckoutConfirmModel()
             {
@@ -2039,7 +2138,9 @@ public partial class CheckoutController : BasePublicController
 
                 var store = await _storeContext.GetCurrentStoreAsync();
                 var cart = await _shoppingCartService.GetShoppingCartAsync(customer, ShoppingCartType.ShoppingCart, store.Id);
-
+                
+                activity?.SetTag("cart.item_count", cart?.Count ?? 0);
+                
                 if (!cart.Any())
                     throw new Exception("Your cart is empty");
 
@@ -2052,6 +2153,9 @@ public partial class CheckoutController : BasePublicController
                 //prevent 2 orders being placed within an X seconds time frame
                 if (!await IsMinimumOrderPlacementIntervalValidAsync(customer))
                     throw new Exception(await _localizationService.GetResourceAsync("Checkout.MinOrderPlacementInterval"));
+
+                // Record that an order placement has started
+                DiagnosticsConfig.OrdersStarted.Add(1, new KeyValuePair<string, object>("customer.id", customer.Id));
 
                 //place order
                 var processPaymentRequest = await _orderProcessingService.GetProcessPaymentRequestAsync();
@@ -2068,10 +2172,25 @@ public partial class CheckoutController : BasePublicController
                 processPaymentRequest.CustomerId = customer.Id;
                 processPaymentRequest.PaymentMethodSystemName = await _genericAttributeService.GetAttributeAsync<string>(customer,
                     NopCustomerDefaults.SelectedPaymentMethodAttribute, store.Id);
+                    
+                activity?.SetTag("payment.method", processPaymentRequest.PaymentMethodSystemName);
+                    
                 await _orderProcessingService.SetProcessPaymentRequestAsync(processPaymentRequest);
                 var placeOrderResult = await _orderProcessingService.PlaceOrderAsync(processPaymentRequest);
+                
                 if (placeOrderResult.Success)
                 {
+                    // RECORD SUCCESSFUL ORDER METRICS
+                    var order = placeOrderResult.PlacedOrder;
+                    DiagnosticsConfig.OrderValue.Record((double)order.OrderTotal, 
+                        new KeyValuePair<string, object>("order.id", order.Id),
+                        new KeyValuePair<string, object>("payment.method", order.PaymentMethodSystemName));
+                    
+                    activity?.SetTag("order.id", order.Id);
+                    activity?.SetTag("order.total", order.OrderTotal);
+                    activity?.SetTag("order.status", order.OrderStatus.ToString());
+                    activity?.SetStatus(ActivityStatusCode.Ok, "Order placed successfully");
+                    
                     await _orderProcessingService.SetProcessPaymentRequestAsync(null);
                     var postProcessPaymentRequest = new PostProcessPaymentRequest
                     {
@@ -2081,9 +2200,11 @@ public partial class CheckoutController : BasePublicController
                     var paymentMethod = await _paymentPluginManager
                         .LoadPluginBySystemNameAsync(placeOrderResult.PlacedOrder.PaymentMethodSystemName, customer, store.Id);
                     if (paymentMethod == null)
+                    {
                         //payment method could be null if order total is 0
                         //success
                         return Json(new { success = 1 });
+                    }
 
                     if (paymentMethod.PaymentMethodType == PaymentMethodType.Redirection)
                     {
@@ -2098,16 +2219,39 @@ public partial class CheckoutController : BasePublicController
                     }
 
                     await _paymentService.PostProcessPaymentAsync(postProcessPaymentRequest);
+
+                    // ========== ADD INVENTORY TEST CODE HERE ==========
+                    var testProductItem = await _productService.GetProductByIdAsync(1);
+                    if (testProductItem != null)
+                    {
+                        var currentStockLevel = await _productService.GetTotalStockQuantityAsync(testProductItem);
+                        Console.WriteLine($"Test inventory for product 1: {currentStockLevel}");
+                        DiagnosticsConfig.InventoryLevel.Record(currentStockLevel,
+                            new KeyValuePair<string, object>("product.id", testProductItem.Id),
+                            new KeyValuePair<string, object>("test", "true"));
+                    }
+                    // ========== END INVENTORY TEST CODE ==========
+
                     //success
                     return Json(new { success = 1 });
                 }
 
+                // RECORD ORDER FAILURE METRICS
+                DiagnosticsConfig.OrdersFailed.Add(1, 
+                    new KeyValuePair<string, object>("error.type", "validation"),
+                    new KeyValuePair<string, object>("error.count", placeOrderResult.Errors.Count));
+                
+                activity?.SetTag("order.errors", string.Join(", ", placeOrderResult.Errors));
+                activity?.SetStatus(ActivityStatusCode.Error, "Order validation failed");
+                
                 //error
                 foreach (var error in placeOrderResult.Errors)
                     confirmOrderModel.Warnings.Add(error);
             }
             else
+            {
                 confirmOrderModel.Warnings.Add(await _localizationService.GetResourceAsync("Common.WrongCaptchaMessage"));
+            }
 
             return Json(new
             {
@@ -2121,6 +2265,15 @@ public partial class CheckoutController : BasePublicController
         }
         catch (Exception exc)
         {
+            // RECORD EXCEPTION FAILURE METRICS
+            DiagnosticsConfig.OrdersFailed.Add(1, 
+                new KeyValuePair<string, object>("error.type", "exception"),
+                new KeyValuePair<string, object>("error.message", exc.Message));
+            
+            activity?.SetStatus(ActivityStatusCode.Error, exc.Message);
+            activity?.SetTag("exception.type", exc.GetType().Name);
+            activity?.SetTag("exception.stacktrace", exc.StackTrace);
+            
             await _logger.WarningAsync(exc.Message, exc, await _workContext.GetCurrentCustomerAsync());
             return Json(new { error = 1, message = exc.Message });
         }
