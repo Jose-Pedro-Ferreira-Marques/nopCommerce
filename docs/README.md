@@ -1,9 +1,3 @@
-# nopCommerce — Observability Assignment
-
-A fork of [nopSolutions/nopCommerce](https://github.com/nopSolutions/nopCommerce) instrumented with OpenTelemetry tracing, Prometheus metrics, and structured logging via Serilog. The instrumented flow is **Customer Places an Order** — from HTTP entry through shopping cart, payment, and inventory adjustment.
-
----
-
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
@@ -194,12 +188,20 @@ Default credentials:
 - Username: `admin`
 - Password: `admin`
 
-**Import the dashboard:**
+**Import the dashboards:**
+
+There are three dashboards to import. Repeat the steps below for each file:
 
 1. In the left sidebar, click **Dashboards → Import**.
-2. Upload the file `grafana/nopcommerce-order-flow.json` from the repository root.
-3. Select **Prometheus** as the data source when prompted.
-4. Click **Import**.
+2. Upload the file and select the correct data source when prompted:
+
+| File | Data source |
+|---|---|
+| `dashboard/dashboard_prometheus.json` | Prometheus |
+| `dashboard/dashboard_logs.json` | Loki |
+| `dashboard/dashboard_traces.json` | Jaeger |
+
+3. Click **Import** after each one.
 
 The dashboard includes the following panels:
 
@@ -248,13 +250,7 @@ The load test script (`load_tests/order-flow-test.js`) drives the full order pla
 **Install k6:**
 
 ```bash
-# macOS
-brew install k6
 
-# Windows
-choco install k6
-
-# Docker (no install required)
 docker run --rm -i grafana/k6 run - < load_tests/order-flow-test.js
 ```
 
@@ -324,17 +320,20 @@ nopCommerce/
 │               ├── OrderController.cs        # Order.Details span
 │               └── ShoppingCartController.cs # ShoppingCart.AddToCart span
 ├── load_tests/
-│   └── order-flow-test.js                    # k6 load test script
-├── grafana/
-│   └── nopcommerce-order-flow.json           # Grafana dashboard export
+│   ├── order-flow-test.js                    # k6 load test script
+|   ├── CRITIQUE.md                           # Architectural critique
+|   └── README.md                             # This file
+├── dashboard/
+│   ├── dashboard_prometheus.json         # Grafana metrics dashboard (Prometheus)
+│   ├── dashboard_logs.json               # Grafana logs dashboard (Loki)
+│   └── dashboard_traces.json             # Grafana traces dashboard (Jaeger)
 ├── docs/
 │   └── Analysis.md                           # Architecture analysis
 ├── observability-docker-compose.yml          # Jaeger, Prometheus, Grafana, Loki, Promtail
 ├── docker-compose.yml                        # nopCommerce app + SQL Server
 ├── prometheus.yml                            # Prometheus scrape configuration
 ├── promtail-config.yaml                      # Docker log collection configuration
-├── CRITIQUE.md                               # Architectural critique
-└── README.md                                 # This file
+
 ```
 
 ---
